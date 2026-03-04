@@ -1,0 +1,102 @@
+/* Reset */
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+}
+
+/* Full screen center layout */
+.signup-wrapper {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: linear-gradient(135deg, #5f2c82, #49a09d);
+}
+
+/* Card box */
+.signup-box {
+  width: 420px;
+  background: white;
+  padding: 50px 40px;
+  border-radius: 18px;
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.2);
+  text-align: center;
+  animation: slideUp 0.7s ease;
+}
+
+/* Title */
+.signup-title {
+  margin-bottom: 10px;
+  font-size: 26px;
+  color: #333;
+}
+
+/* Tagline */
+.signup-tagline {
+  font-size: 14px;
+  color: #666;
+  margin-bottom: 30px;
+}
+
+/* Form layout */
+.signup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* Inputs */
+.signup-form input {
+  padding: 13px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  font-size: 14px;
+  transition: 0.3s ease;
+}
+
+.signup-form input:focus {
+  outline: none;
+  border-color: #5f2c82;
+  box-shadow: 0 0 0 3px rgba(95, 44, 130, 0.15);
+}
+
+/* Button */
+.signup-button {
+  padding: 13px;
+  border-radius: 30px;
+  border: none;
+  background: #5f2c82;
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+  transition: 0.3s ease;
+}
+
+.signup-button:hover {
+  background: #4a2166;
+  transform: translateY(-3px);
+}
+
+/* Footer */
+.signup-footer {
+  margin-top: 25px;
+  font-size: 14px;
+}
+
+.signup-footer a {
+  color: #5f2c82;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+/* Animation */
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
