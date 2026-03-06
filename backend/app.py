@@ -1,163 +1,167 @@
+import base64
+import numpy as np
+import cv2
+import tensorflow as tf
 from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
+from tensorflow.keras.models import load_model
 from flask_cors import CORS
-from werkzeug.security import generate_password_hash, check_password_hash
-import jwt
-import datetime
-from functools import wraps
 
 app = Flask(__name__)
+CORS(app)
 
-# 🔐 SECRET KEY
-app.config['SECRET_KEY'] = 'supersecretkey'
+IMG_SIZE = 224
 
-# 🌐 Allow React Frontend
-CORS(app, resources={r"/*": {"origins": [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
-]}})
+print("Loading models...")
 
-# 🗄 Database Config
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Load models
+model_stage1 = load_model("stage1_model.h5")
+model_stage2 = load_model("stage2_model.h5")
 
-db = SQLAlchemy(app)
+print("Models loaded successfully")
 
-# ------------------ USER MODEL ------------------
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100))
-    email = db.Column(db.String(100), unique=True)
-    password = db.Column(db.String(200))
+stage2_classes = ['AMD', 'Diabetic_Retinopathy', 'Glaucoma']
 
-# Create DB
-with app.app_context():
-    db.create_all()
+# Find last Conv2D layer
+last_conv_layer_name = None
 
-# ------------------ HOME ------------------
-@app.route("/")
-def home():
-    return "Backend is running successfully!"
+for layer in reversed(model_stage2.layers):
+    if isinstance(layer, tf.keras.layers.Conv2D):
+        last_conv_layer_name = layer.name
+        break
 
-# ------------------ SIGNUP ------------------
-@app.route("/signup", methods=["POST"])
-def signup():
-    data = request.json
+print("Last Conv Layer:", last_conv_layer_name)
 
-    name = data.get("name")
-    email = data.get("email")
-    password = data.get("password")
 
-    if not name or not email or not password:
-        return jsonify({"message": "All fields are required"}), 400
+# ---------- PREPROCESS ----------
+def preprocess_image(img):
+    img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+    img = img.astype("float32") / 255.0
+    img = np.expand_dims(img, axis=0)
+    return img
 
-    if User.query.filter_by(email=email).first():
-        return jsonify({"message": "Email already exists"}), 400
 
-    hashed_password = generate_password_hash(password)
+# ---------- GRADCAM ----------
+def generate_gradcam(img_array):
 
-    new_user = User(
-        name=name,
-        email=email,
-        password=hashed_password
+    grad_model = tf.keras.models.Model(
+        inputs=model_stage2.inputs,
+        outputs=[
+            model_stage2.get_layer(last_conv_layer_name).output,
+            model_stage2.output
+        ]
     )
 
-    db.session.add(new_user)
-    db.session.commit()
+    with tf.GradientTape() as tape:
 
-    return jsonify({"message": "User registered successfully"}), 201
+        conv_outputs, predictions = grad_model(img_array)
 
+        predictions = tf.reshape(predictions, (-1,))
 
-# ------------------ LOGIN ------------------
-@app.route("/login", methods=["POST"])
-def login():
-    data = request.json
+        class_index = tf.argmax(predictions)
 
-    email = data.get("email")
-    password = data.get("password")
+        loss = predictions[class_index]
 
-    user = User.query.filter_by(email=email).first()
+    grads = tape.gradient(loss, conv_outputs)
 
-    if user and check_password_hash(user.password, password):
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-        token = jwt.encode({
-            "user_id": user.id,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-        }, app.config['SECRET_KEY'], algorithm="HS256")
+    conv_outputs = conv_outputs[0]
 
-        # Ensure token is string
-        if isinstance(token, bytes):
-            token = token.decode("utf-8")
+    heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
 
-        return jsonify({
-            "message": "Login successful",
-            "token": token
-        }), 200
+    heatmap = tf.maximum(heatmap, 0)
 
-    return jsonify({"message": "Invalid email or password"}), 401
+    max_val = tf.reduce_max(heatmap)
+
+    if max_val != 0:
+        heatmap = heatmap / max_val
+
+    return heatmap.numpy(), int(class_index)
 
 
-# ------------------ TOKEN REQUIRED DECORATOR ------------------
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization")
+# ---------- MEDICAL MESSAGE ----------
+def get_medical_message(disease):
 
-        if not auth_header:
-            return jsonify({"message": "Token is missing"}), 401
+    messages = {
+        "AMD": "Age-related macular degeneration[AMD] detected.",
+        "Diabetic_Retinopathy": "Diabetic Retinopathy detected.",
+        "Glaucoma": "Glaucoma detected."
+    }
 
-        parts = auth_header.split(" ")
-
-        if len(parts) != 2 or parts[0] != "Bearer":
-            return jsonify({"message": "Invalid token format"}), 401
-
-        token = parts[1]
-
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.get(data["user_id"])
-
-            if not current_user:
-                return jsonify({"message": "User not found"}), 401
-
-        except jwt.ExpiredSignatureError:
-            return jsonify({"message": "Token expired"}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"message": "Invalid token"}), 401
-
-        return f(current_user, *args, **kwargs)
-
-    return decorated
+    return messages.get(disease, "Abnormal retinal condition detected.")
 
 
-# ------------------ PROTECTED DASHBOARD ------------------
-@app.route("/dashboard", methods=["GET"])
-@token_required
-def dashboard(current_user):
-    return jsonify({
-        "message": f"Welcome {current_user.name}, this is a protected route!"
-    })
+# ---------- HOME ROUTE ----------
+@app.route("/")
+def home():
+    return "EyeDx Backend Running 🚀"
 
 
-# ------------------ PROTECTED PREDICT ------------------
+# ---------- PREDICT API ----------
 @app.route("/predict", methods=["POST"])
-@token_required
-def predict(current_user):
-    data = request.json
-    input_data = data.get("input")
+def predict():
 
-    if not input_data:
-        return jsonify({"message": "Input data required"}), 400
+    file = request.files["image"]
 
-    # Dummy AI logic (replace with real model)
-    result = f"Prediction for {input_data}"
+    file_bytes = np.frombuffer(file.read(), np.uint8)
+
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    img_array = preprocess_image(img_rgb)
+
+    # Stage 1 prediction
+    stage1_pred = model_stage1.predict(img_array, verbose=0)[0][0]
+
+    # Normal case
+    if stage1_pred > 0.5:
+        return jsonify({
+            "status": "Normal",
+            "disease": "Eye condition looks healthy",
+            "gradcam": None
+        })
+
+    # Stage 2 disease detection
+    heatmap, class_index = generate_gradcam(img_array)
+
+    disease = stage2_classes[class_index]
+
+    explanation = get_medical_message(disease)
+
+    # Resize heatmap
+    heatmap = cv2.resize(
+        heatmap,
+        (img.shape[1], img.shape[0])
+    )
+
+    heatmap = np.uint8(255 * heatmap)
+
+    heatmap = cv2.applyColorMap(
+        heatmap,
+        cv2.COLORMAP_JET
+    )
+
+    gradcam_img = cv2.addWeighted(
+        img,
+        0.6,
+        heatmap,
+        0.4,
+        0
+    )
+
+    # Convert image → Base64
+    _, buffer = cv2.imencode(".jpg", gradcam_img)
+
+    gradcam_base64 = base64.b64encode(buffer).decode("utf-8")
 
     return jsonify({
-        "user": current_user.name,
-        "result": result
+        "status": disease,
+        "disease": explanation,
+        "gradcam": gradcam_base64
     })
 
 
-# ------------------ RUN ------------------
+# ---------- RUN SERVER ----------
 if __name__ == "__main__":
     app.run(debug=True)
